@@ -1,27 +1,26 @@
-network_volume:
+network_drive:
     base_path: /workspace
-    checkpoints:
+    checkpoints: 
         - ComfyUI/models/checkpoints
-        - models/diffusion
-        - ComfyUI/models/diffusion
+        - models/checkpoints
     diffusion_models:
         - ComfyUI/models/diffusion
         - models/diffusion
     unet:
         - ComfyUI/models/diffusion
         - models/diffusion
-    wav2vec2:
-        - models/wav2vec2
-        - ComfyUI/models/wav2vec2
-    clip_vision:
-        - ComfyUI/models/clip_vision
-        - models/clip_vision
-    clip:
-        - ComfyUI/models/clip
-        - models/clip
     vae:
         - ComfyUI/models/vae
         - models/vae
+    clip:
+        - ComfyUI/models/clip
+        - models/clip
+    clip_vision:
+        - ComfyUI/models/clip_vision
+        - models/clip_vision
+    wav2vec2:
+        - models/wav2vec2
+        - ComfyUI/models/wav2vec2
     loras:
         - ComfyUI/models/loras
         - models/loras
