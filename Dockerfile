@@ -9,20 +9,23 @@ ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
 WORKDIR /app
 
-# Clone Wan2.1
+# Install dependencies for the handler
+RUN pip install --no-cache-dir runpod requests websocket-client librosa
+
+# Clone Wan2.1 and install its requirements
 RUN git clone https://github.com/Wan-Video/Wan2.1.git
 WORKDIR /app/Wan2.1
-
-# FIX 1: Install flash-attn without build isolation to prevent the 1-hour hang
 RUN pip install flash-attn==2.5.6 --no-build-isolation
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir runpod requests
 
-COPY handler.py /app/handler.py
 WORKDIR /app
+# COPY all necessary files from your Git repo to the container
+COPY handler.py /app/handler.py
+COPY I2V_single.json /app/I2V_single.json
+COPY requirements.txt /app/requirements.txt
 
-# FIX 2: Force HuggingFace to cache the 15GB of text encoders to your Network Volume
-# so it doesn't download them every time a pod wakes up.
+# FIX: Ensure HF caches to the network volume
 ENV HF_HOME="/workspace/huggingface_cache"
 
+# Start the handler
 CMD ["python", "-u", "handler.py"]
