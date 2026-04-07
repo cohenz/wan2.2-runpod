@@ -1,130 +1,112 @@
 import runpod
 import os
-import websocket
 import json
 import uuid
+import time
 import urllib.request
 import requests
-import time
 
-server_address = "127.0.0.1:8188"
-client_id = str(uuid.uuid4())
+SERVER_ADDRESS = "127.0.0.1:8188"
+INPUT_DIR = "/app/input"
+OUTPUT_DIR = "/app/output"
 
-def wait_for_comfy():
-    print("Waiting for ComfyUI API to become available...")
-    while True:
-        try:
-            urllib.request.urlopen(f"http://{server_address}/", timeout=1)
-            print("ComfyUI is ready!")
-            break
-        except:
-            time.sleep(1)
+def download_file(url, save_path):
+    response = requests.get(url)
+    response.raise_for_status()
+    with open(save_path, 'wb') as f:
+        f.write(response.content)
+
+def queue_prompt(prompt):
+    p = {"prompt": prompt, "client_id": str(uuid.uuid4())}
+    data = json.dumps(p).encode('utf-8')
+    req = urllib.request.Request(f"http://{SERVER_ADDRESS}/prompt", data=data)
+    response = urllib.request.urlopen(req)
+    return json.loads(response.read())
+
+def get_history(prompt_id):
+    req = urllib.request.Request(f"http://{SERVER_ADDRESS}/history/{prompt_id}")
+    response = urllib.request.urlopen(req)
+    return json.loads(response.read())
 
 def handler(job):
     job_input = job.get("input", {})
-    wait_for_comfy()
+    prompt_text = job_input.get("prompt", "a man is talking")
+    frames = int(job_input.get("frames", 81))
+    image_url = job_input.get("image_url")
+    
+    # Optional audio url if your MultiTalk node requires it
+    audio_url = job_input.get("audio_url") 
 
-    # 1. Ensure required directories exist on your Network Volume
-    input_dir = "/workspace/ComfyUI/input"
-    output_dir = "/workspace/ComfyUI/output"
-    os.makedirs(input_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
+    job_id = job.get("id", str(uuid.uuid4()))
+    
+    # 1. Download Input Files locally
+    img_filename = f"{job_id}.jpg"
+    img_path = os.path.join(INPUT_DIR, img_filename)
+    if image_url:
+        download_file(image_url, img_path)
+        
+    audio_filename = f"{job_id}.wav"
+    audio_path = os.path.join(INPUT_DIR, audio_filename)
+    if audio_url:
+        download_file(audio_url, audio_path)
 
-    # 2. Load Workflow
+    # 2. Load and Modify Workflow
     with open("/app/I2V_single.json", 'r') as f:
         workflow = json.load(f)
 
-    # 3. Inject WordPress inputs securely
-    workflow["241"]["inputs"]["positive_prompt"] = job_input.get("prompt", "a man is talking")
-    workflow["270"]["inputs"]["value"] = int(job_input.get("frames", 81))
+    # Update Nodes (Make sure these IDs match your actual JSON file)
+    workflow["241"]["inputs"]["positive_prompt"] = prompt_text
+    workflow["270"]["inputs"]["value"] = frames
     
-    # Safely parse the exact size strings your WP plugin sends
-    size_str = str(job_input.get("size", "1280720"))
-    if size_str == "1280720":
-        w, h = 1280, 720
-    elif size_str == "7201280":
-        w, h = 720, 1280
-    elif size_str == "19201080":
-        w, h = 1920, 1080
-    elif size_str == "10801920":
-        w, h = 1080, 1920
-    else:
-        w, h = 1280, 720
-        
-    workflow["245"]["inputs"]["value"] = w
-    workflow["246"]["inputs"]["value"] = h
+    if image_url:
+        workflow["291"]["inputs"]["image"] = img_filename
+    if audio_url:
+        workflow["125"]["inputs"]["audio"] = audio_filename
 
-    # 4. Handle Base Image Download (if i2v)
-    img_path = None
-    if job_input.get("image"):
-        img_name = f"wp_base_{uuid.uuid4()}.jpg"
-        img_path = os.path.join(input_dir, img_name)
-        
-        # Download image from WordPress to ComfyUI input folder
-        req = urllib.request.Request(job_input.get("image"), headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response, open(img_path, 'wb') as out_file:
-            out_file.write(response.read())
-            
-        workflow["284"]["inputs"]["image"] = img_name
+    # 3. Execute Workflow
+    print("Queueing workflow...")
+    prompt_response = queue_prompt(workflow)
+    prompt_id = prompt_response['prompt_id']
 
-    # 5. Execute via WebSocket
-    ws = websocket.WebSocket()
-    ws.connect(f"ws://{server_address}/ws?clientId={client_id}")
-    
-    p = {"prompt": workflow, "client_id": client_id}
-    data = json.dumps(p).encode('utf-8')
-    req = urllib.request.Request(f"http://{server_address}/prompt", data=data)
-    prompt_id = json.loads(urllib.request.urlopen(req).read())['prompt_id']
-
-    # Wait for ComfyUI generation to finish
+    # 4. Wait for generation to complete
     while True:
-        out = ws.recv()
-        if isinstance(out, str):
-            msg = json.loads(out)
-            if msg['type'] == 'executing' and msg['data']['node'] is None:
-                break
-    ws.close()
+        history = get_history(prompt_id)
+        if prompt_id in history:
+            print("Generation complete!")
+            break
+        time.sleep(2)
 
-    # 6. Fetch the filename from ComfyUI
-    with urllib.request.urlopen(f"http://{server_address}/history/{prompt_id}") as response:
-        history = json.loads(response.read())[prompt_id]
-        filename = history['outputs']['131']['gifs'][0]['filename']
-        file_path = os.path.join(output_dir, filename)
-        
-    print(f"Generation complete. Uploading {filename} to tmpfiles.org...")
+    # 5. Find the output video
+    output_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.mp4')]
+    if not output_files:
+        raise Exception("Video generation failed: No output file found.")
     
-    # 7. Upload to tmpfiles.org via API
+    # Get the most recently created file
+    output_files.sort(key=lambda x: os.path.getmtime(os.path.join(OUTPUT_DIR, x)), reverse=True)
+    video_path = os.path.join(OUTPUT_DIR, output_files[0])
+
+    # 6. Upload to tmpfiles (as per your original code logic)
+    print("Uploading to tmpfiles.org...")
     upload_url = "https://tmpfiles.org/api/v1/upload"
     try:
-        with open(file_path, 'rb') as f:
-            files = {'file': (filename, f, 'video/mp4')}
+        with open(video_path, 'rb') as f:
+            files = {'file': (output_files[0], f, 'video/mp4')}
             upload_resp = requests.post(upload_url, files=files)
             
         if upload_resp.status_code == 200:
             resp_data = upload_resp.json()
-            # The API returns a viewer URL (e.g., https://tmpfiles.org/12345/video.mp4)
             viewer_url = resp_data.get('data', {}).get('url', '')
-            
-            # CRITICAL: We must convert it to a direct download link so WordPress can save the MP4
-            # We do this by injecting '/dl/' into the URL path
             direct_url = viewer_url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
         else:
-            direct_url = None
-            print(f"Failed to upload. Status code: {upload_resp.status_code}")
+            raise Exception("Failed to upload to tmpfiles")
     except Exception as e:
-        print(f"Upload error: {str(e)}")
-        direct_url = None
+        return {"error": f"Upload failed: {str(e)}"}
 
-    # 8. Clean up local files on the network volume to prevent filling up disk space
-    if os.path.exists(file_path):
-        os.remove(file_path)
-    if img_path and os.path.exists(img_path):
-        os.remove(img_path)
+    # 7. Cleanup Local Files
+    if os.path.exists(img_path): os.remove(img_path)
+    if os.path.exists(audio_path): os.remove(audio_path)
+    if os.path.exists(video_path): os.remove(video_path)
 
-    if not direct_url:
-        return {"error": "Video generated but failed to upload to temporary storage."}
-
-    # 9. Return the exact JSON structure your WP plugin expects
-    return {"url": direct_url}
+    return {"video_url": direct_url}
 
 runpod.serverless.start({"handler": handler})
