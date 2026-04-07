@@ -24,17 +24,15 @@ def handler(job):
     job_input = job.get("input", {})
     wait_for_comfy()
 
-    # 1. Ensure required directories exist on your Network Volume
-    # We use /workspace/ComfyUI because that is where your start.sh expects it
-    input_dir = "/workspace/ComfyUI/input"
-    output_dir = "/workspace/ComfyUI/output"
+# 1. Update directories to match start.sh
+    input_dir = "/workspace/input"
+    output_dir = "/workspace/output"
     os.makedirs(input_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
     # 2. Load Workflow
     with open("/app/I2V_single.json", 'r') as f:
         workflow = json.load(f)
-
     # 3. Map Inputs (Restoring your original logic)
     workflow["241"]["inputs"]["positive_prompt"] = job_input.get("prompt", "a person talking")
     workflow["270"]["inputs"]["value"] = int(job_input.get("frames", 81))
@@ -53,8 +51,7 @@ def handler(job):
     workflow["245"]["inputs"]["value"] = w
     workflow["246"]["inputs"]["value"] = h
 
-    # 4. Handle Image Download (Restoring your urllib logic)
-    # Supporting both 'image' and 'image_url' keys for WordPress compatibility
+    # 4. Handle Image Download
     image_url = job_input.get("image") or job_input.get("image_url")
     img_name = f"input_{uuid.uuid4()}.png"
     img_path = os.path.join(input_dir, img_name)
@@ -66,7 +63,9 @@ def handler(job):
             opener.addheaders = [('User-agent', 'Mozilla/5.0')]
             urllib.request.install_opener(opener)
             urllib.request.urlretrieve(image_url, img_path)
-            workflow["291"]["inputs"]["image"] = img_name
+            
+            # FIX: Change "291" to "284" to inject into the LoadImage node!
+            workflow["284"]["inputs"]["image"] = img_name 
         except Exception as e:
             return {"error": f"Failed to download image: {str(e)}"}
 
