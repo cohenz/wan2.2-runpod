@@ -1,10 +1,10 @@
 import runpod
-from runpod.serverless.utils import rp_upload
 import os
 import websocket
 import json
 import uuid
 import urllib.request
+import requests
 import time
 
 server_address = "127.0.0.1:8188"
@@ -55,6 +55,7 @@ def handler(job):
     workflow["246"]["inputs"]["value"] = h
 
     # 4. Handle Base Image Download (if i2v)
+    img_path = None
     if job_input.get("image"):
         img_name = f"wp_base_{uuid.uuid4()}.jpg"
         img_path = os.path.join(input_dir, img_name)
@@ -84,24 +85,46 @@ def handler(job):
                 break
     ws.close()
 
-    # 6. Fetch the filename and upload to Cloud Storage
+    # 6. Fetch the filename from ComfyUI
     with urllib.request.urlopen(f"http://{server_address}/history/{prompt_id}") as response:
         history = json.loads(response.read())[prompt_id]
         filename = history['outputs']['131']['gifs'][0]['filename']
         file_path = os.path.join(output_dir, filename)
         
-    print(f"Generation complete. Uploading {filename}...")
+    print(f"Generation complete. Uploading {filename} to tmpfiles.org...")
     
-    # Upload file using RunPod's built-in utility
-    uploaded_url = rp_upload.upload_file_to_bucket(job.get("id"), file_path)
+    # 7. Upload to tmpfiles.org via API
+    upload_url = "https://tmpfiles.org/api/v1/upload"
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'file': (filename, f, 'video/mp4')}
+            upload_resp = requests.post(upload_url, files=files)
+            
+        if upload_resp.status_code == 200:
+            resp_data = upload_resp.json()
+            # The API returns a viewer URL (e.g., https://tmpfiles.org/12345/video.mp4)
+            viewer_url = resp_data.get('data', {}).get('url', '')
+            
+            # CRITICAL: We must convert it to a direct download link so WordPress can save the MP4
+            # We do this by injecting '/dl/' into the URL path
+            direct_url = viewer_url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+        else:
+            direct_url = None
+            print(f"Failed to upload. Status code: {upload_resp.status_code}")
+    except Exception as e:
+        print(f"Upload error: {str(e)}")
+        direct_url = None
 
-    # Clean up local files on the network volume to prevent filling up disk space
+    # 8. Clean up local files on the network volume to prevent filling up disk space
     if os.path.exists(file_path):
         os.remove(file_path)
-    if job_input.get("image") and os.path.exists(img_path):
+    if img_path and os.path.exists(img_path):
         os.remove(img_path)
 
-    # 7. Return the exact JSON structure your WP plugin expects
-    return {"url": uploaded_url}
+    if not direct_url:
+        return {"error": "Video generated but failed to upload to temporary storage."}
+
+    # 9. Return the exact JSON structure your WP plugin expects
+    return {"url": direct_url}
 
 runpod.serverless.start({"handler": handler})
